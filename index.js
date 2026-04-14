@@ -10,23 +10,15 @@ const app = express();
 const server = http.createServer(app);
 
 // Initialize Socket.io (Goal #10 & #20: Real-time Arena)
-const allowedOrigins = [
-  process.env.CLIENT_URL,
-  "http://localhost:3000"
-].filter(Boolean);
-
 const io = new Server(server, {
   cors: {
-    origin: allowedOrigins,
+    origin: "*",
     methods: ["GET", "POST"]
   }
 });
 
 connectDB();
-app.use(cors({
-  origin: allowedOrigins,
-  credentials: true
-}));
+app.use(cors());
 app.use(express.json());
 app.use("/uploads", express.static("uploads"));
 
@@ -117,7 +109,7 @@ io.on("connection", (socket) => {
       const response = await axios.post(
         `${pythonEngineUrl}/api/generate-adaptive-step`,
         pythonPayload,
-        { timeout: 30000 }
+        { timeout: 60000 }
       );
 
       // 6. Check if this was the last question

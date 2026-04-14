@@ -21,7 +21,7 @@ const axios = require("axios");
 router.post("/generate-questions", async (req, res) => {
   try {
     const pythonUrl = process.env.PYTHON_ENGINE_URL || "http://localhost:5002";
-    const response = await axios.post(`${pythonUrl}/api/generate-questions`, req.body, { timeout: 30000 });
+    const response = await axios.post(`${pythonUrl}/api/generate-questions`, req.body, { timeout: 60000 });
     res.json(response.data);
   } catch (err) {
     console.error("Python generate-questions proxy error:", err.message);
