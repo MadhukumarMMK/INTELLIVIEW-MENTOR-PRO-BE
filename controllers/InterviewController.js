@@ -1,4 +1,4 @@
-const Interview = require("../models/interview");
+const Interview = require("../models/Interview");
 const User = require("../models/user");
 const AdminSettings = require("../models/AdminSettings");
 

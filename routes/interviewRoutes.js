@@ -6,7 +6,7 @@ const {
   getInterviewReport, 
   getUserHistory, 
   deleteInterview 
-} = require("../controllers/interviewController");
+} = require("../controllers/InterviewController");
 const adaptiveController = require("../controllers/adaptiveController");
 
 router.post("/create", createInterview);

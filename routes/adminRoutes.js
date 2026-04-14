@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const AdminSettings = require('../models/AdminSettings');
-const Interview = require('../models/interview');
+const Interview = require('../models/Interview');
 // Auth middleware can be added later when admin auth is implemented
 // const isAdmin = require('../middleware/isAdmin');
 // const verifyToken = require('../middleware/verifyToken');
