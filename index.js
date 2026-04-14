@@ -74,26 +74,26 @@ io.on("connection", (socket) => {
         ? confidenceBuffer.reduce((a, b) => a + b) / confidenceBuffer.length
         : 50;
 
-      // 2. Encode buffered audio for Librosa/CNN-LSTM analysis
-      let audioBase64 = "";
+      // 2. Calculate audio size for confidence heuristic (no base64 needed)
+      let audioSize = 0;
       if (audioChunks.length > 0) {
         const combinedAudio = Buffer.concat(audioChunks);
-        audioBase64 = combinedAudio.toString("base64");
-        console.log(`Audio: ${audioChunks.length} chunks, ${combinedAudio.length} bytes`);
+        audioSize = combinedAudio.length;
+        console.log(`Audio: ${audioChunks.length} chunks, ${audioSize} bytes`);
       }
 
       // 3. Clear buffers for next question
       confidenceBuffer = [];
       audioChunks = [];
 
-      // 4. Build payload for Python Engine
+      // 4. Build lightweight payload for Python Engine (no audio binary)
       const pythonPayload = {
         roll_no: payload.roll_no,
         question: payload.lastQuestion || "",
         answer: payload.lastAnswer || "",
         difficulty: payload.difficulty || "Medium",
         avg_confidence: avgConfidence,
-        audio_data: audioBase64,
+        audio_size: audioSize,
         was_skipped: wasSkipped,
         tech: payload.tech || "General",
         module: payload.module || "",
@@ -105,12 +105,22 @@ io.on("connection", (socket) => {
         total_questions: totalQuestions
       };
 
-      // 5. Bridge to Python Engine
-      const response = await axios.post(
-        `${pythonEngineUrl}/api/generate-adaptive-step`,
-        pythonPayload,
-        { timeout: 60000 }
-      );
+      // 5. Bridge to Python Engine (with retry on timeout)
+      let response;
+      try {
+        response = await axios.post(
+          `${pythonEngineUrl}/api/generate-adaptive-step`,
+          pythonPayload,
+          { timeout: 60000 }
+        );
+      } catch (firstErr) {
+        console.log("First attempt failed, retrying...", firstErr.message);
+        response = await axios.post(
+          `${pythonEngineUrl}/api/generate-adaptive-step`,
+          pythonPayload,
+          { timeout: 60000 }
+        );
+      }
 
       // 6. Check if this was the last question
       const isComplete = questionsAsked >= totalQuestions;
