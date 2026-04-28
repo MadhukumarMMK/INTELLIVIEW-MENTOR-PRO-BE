@@ -42,7 +42,14 @@ const uploadAndParseResume = async (req, res) => {
 
         if (!req.file) return res.status(400).json({ message: "No resume uploaded." });
 
-        // Resume Parsing — uses our own Python engine (local port 5002)
+        // Find the existing user so we can clean up their previous resume file
+        const existingUser = await User.findOne({ roll_no });
+        if (!existingUser) {
+            if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+            return res.status(404).json({ message: "User not found." });
+        }
+
+        // Send the NEW file to the Python parser for skill extraction
         const formData = new FormData();
         formData.append('file', fs.createReadStream(req.file.path), req.file.originalname);
 
@@ -56,56 +63,62 @@ const uploadAndParseResume = async (req, res) => {
             );
 
             const extractedData = nlpResponse.data.data;
+            if (!extractedData) throw new Error("No data returned from parser");
 
-            if (!extractedData) {
-                throw new Error("No data returned from parser");
+            // Parse succeeded — only now is it safe to delete the OLD resume file
+            if (existingUser.resume_path && existingUser.resume_path !== req.file.path) {
+                try {
+                    if (fs.existsSync(existingUser.resume_path)) {
+                        fs.unlinkSync(existingUser.resume_path);
+                    }
+                } catch (cleanupErr) {
+                    console.warn("Could not remove previous resume:", cleanupErr.message);
+                }
             }
 
-            // Build update fields from extracted data
+            // Build update fields — a resume re-upload is the user declaring the new
+            // resume is their current source of truth, so REPLACE skills AND refresh
+            // identity fields (name, email, github, linkedin, mobile) from the new CV.
             const updateFields = {
-                mobile_number: extractedData.mobile_number || "",
                 skills: extractedData.skills || [],
                 resume_path: req.file.path,
+                mobile_number: extractedData.mobile_number || existingUser.mobile_number || "",
             };
 
-            // Always update name from resume — new resume = new name
-            if (extractedData.name) {
-                updateFields.first_name = extractedData.name;
-            }
-
-            // Always update email from resume
-            if (extractedData.email) {
-                updateFields.email = extractedData.email;
-            }
-
-            // Save social links if found in resume
+            if (extractedData.name) updateFields.first_name = extractedData.name;
+            if (extractedData.email) updateFields.email = extractedData.email;
             if (extractedData.github) updateFields.github_url = extractedData.github;
             if (extractedData.linkedin) updateFields.linkedin_url = extractedData.linkedin;
 
             const updatedUser = await User.findOneAndUpdate(
-                { roll_no: roll_no },
+                { roll_no },
                 { $set: updateFields },
                 { new: true }
-            );
+            ).select("-password");
 
-            res.status(200).json({
-                message: "Resume parsed successfully by ML Engine",
+            return res.status(200).json({
+                message: "Resume parsed successfully",
                 extracted_data: extractedData,
                 user: updatedUser
             });
 
         } catch (apiError) {
             console.error("Python Bridge Error:", apiError.message);
-            res.status(503).json({ message: "ML Engine is offline. Check Python server on port 5002." });
-        } finally {
-            // Goal #14: File system maintenance - Always clean temp storage
-            if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+            // Parser failed — delete the NEW file so we don't orphan it
+            if (req.file && fs.existsSync(req.file.path)) {
+                try { fs.unlinkSync(req.file.path); } catch (_) {}
+            }
+            return res.status(503).json({
+                message: "Resume parser is unavailable. Please try again shortly."
+            });
         }
 
     } catch (error) {
         console.error("Resume Parsing Error:", error.message);
-        if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-        res.status(500).json({ message: "Error processing resume." });
+        if (req.file && fs.existsSync(req.file.path)) {
+            try { fs.unlinkSync(req.file.path); } catch (_) {}
+        }
+        return res.status(500).json({ message: "Error processing resume." });
     }
 };
 

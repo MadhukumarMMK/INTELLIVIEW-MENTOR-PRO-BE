@@ -108,6 +108,55 @@ Router.get("/profile/:roll_no", async (req, res) => {
   }
 });
 
+// PUBLIC shareable profile view — anyone with the link can see basic info +
+// completed NON-ARCHIVED interview reports. No auth required.
+// NOTE: returns a curated safe projection — no email/phone/mobile leaked
+// unless the user explicitly chose to make those public.
+Router.get("/public-profile/:roll_no", async (req, res) => {
+  try {
+    const Interview = require("../models/Interview");
+    const user = await User.findOne({ roll_no: req.params.roll_no })
+      .select("first_name roll_no college branch passout_year profile_picture github_url linkedin_url skills certifications");
+    if (!user) return res.status(404).json({ message: "Profile not found" });
+
+    // Only completed + non-archived reports
+    const interviews = await Interview.find({
+      roll_no: req.params.roll_no,
+      status: 2,
+      archived: { $ne: true }
+    })
+      .select("technology_name level overall_score question_details mode createdAt")
+      .sort({ createdAt: -1 });
+
+    res.json({
+      user: {
+        first_name: user.first_name || "Anonymous",
+        roll_no: user.roll_no,
+        college: user.college,
+        branch: user.branch,
+        passout_year: user.passout_year,
+        profile_picture: user.profile_picture,
+        github_url: user.github_url,
+        linkedin_url: user.linkedin_url,
+        skills: user.skills || [],
+        certifications_count: (user.certifications || []).length
+      },
+      interviews: interviews.map(i => ({
+        _id: i._id,
+        technology_name: i.technology_name,
+        level: i.level,
+        overall_score: i.overall_score,
+        questions_count: (i.question_details || []).length,
+        mode: i.mode,
+        createdAt: i.createdAt
+      }))
+    });
+  } catch (err) {
+    console.error("Public profile error:", err);
+    res.status(500).json({ message: "Error fetching public profile" });
+  }
+});
+
 // Update profile details
 Router.put("/profile/:roll_no", async (req, res) => {
   try {
@@ -139,21 +188,10 @@ Router.post("/upload-avatar", uploadAvatar.single("avatar"), async (req, res) =>
   }
 });
 
-// Upload/Replace resume (stores path for download)
-Router.post("/upload-resume-file", uploadResume.single("file"), async (req, res) => {
-  try {
-    const { roll_no } = req.body;
-    if (!req.file) return res.status(400).json({ message: "No file uploaded" });
-    const updated = await User.findOneAndUpdate(
-      { roll_no },
-      { resume_path: req.file.path },
-      { new: true }
-    ).select("-password");
-    res.json({ message: "Resume uploaded", user: updated });
-  } catch (err) {
-    res.status(500).json({ message: "Error uploading resume" });
-  }
-});
+// DEPRECATED alias kept for backward compatibility — routes through the real
+// parser so callers that still hit /upload-resume-file get correct behavior
+// (skills extracted, old file cleaned up).
+Router.post("/upload-resume-file", uploadResume.single("file"), UserController.uploadAndParseResume);
 
 // Download resume
 Router.get("/download-resume/:roll_no", async (req, res) => {

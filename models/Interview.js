@@ -43,6 +43,14 @@ const InterviewSchema = mongoose.Schema({
   overall_score: { type: Number, default: 0 },
   created_by: { type: String },
   status: { type: Number },
+
+  // Soft-archive (frees a slot without destroying the report).
+  // Only non-archived completed interviews count against the per-user limit.
+  archived: { type: Boolean, default: false },
+  archived_at: { type: Date },
+
+  // Mode: 'resume' | 'custom' | 'hr' — needed so archived reports can be grouped by type.
+  mode: { type: String },
 }, {
   timestamps: true,
   collection: 'interviews'

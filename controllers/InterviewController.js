@@ -5,18 +5,20 @@ const AdminSettings = require("../models/AdminSettings");
 // 1. CREATE (Start of Interview)
 const createInterview = async (req, res) => {
   try {
-    const { roll_no, technology_name, level, questions_count } = req.body;
+    const { roll_no, technology_name, level, questions_count, mode } = req.body;
 
     // Fetch dynamic limit from admin settings
     const settings = await AdminSettings.findOne();
     const maxInterviews = settings?.max_interviews || 6;
 
-    // Only completed interviews (status=2) count toward the limit
-    // In-progress or abandoned interviews don't consume the limit
-    const completedCount = await Interview.countDocuments({ roll_no, status: 2 });
+    // Only completed + NOT archived interviews count toward the limit.
+    // Archived interviews are preserved for history but free up a slot.
+    const completedCount = await Interview.countDocuments({
+      roll_no, status: 2, archived: { $ne: true }
+    });
     if (completedCount >= maxInterviews) {
       return res.status(403).json({
-        message: `Interview limit reached (${completedCount}/${maxInterviews}). You have completed the maximum allowed interviews.`
+        message: `Interview limit reached (${completedCount}/${maxInterviews}). Archive an old interview from My Reports to free a slot.`
       });
     }
 
@@ -28,6 +30,7 @@ const createInterview = async (req, res) => {
       technology_name,
       level,
       questions_count,
+      mode,
       start_date_time: new Date(),
       status: 1 // 1 = In Progress
     });
@@ -46,7 +49,13 @@ const updateInterviewResults = async (req, res) => {
     const { question_details, emotions, overall_analysis, overall_score } = req.body;
 
     const updateData = { status: 2 };
-    if (question_details) updateData.question_details = question_details;
+    if (question_details) {
+      updateData.question_details = question_details;
+      // Overwrite questions_count with the ACTUAL number asked — the create
+      // step saves a placeholder because the mode-specific count isn't known
+      // there, but by this point we have the real answered list.
+      updateData.questions_count = String(question_details.length);
+    }
     if (emotions) updateData.emotions = emotions;
     if (overall_analysis) updateData.overall_analysis = overall_analysis;
     if (overall_score !== undefined) updateData.overall_score = overall_score;
@@ -98,7 +107,7 @@ const getUserHistory = async (req, res) => {
   }
 };
 
-// 5. DELETE
+// 5. DELETE — kept for admin/cleanup + aborted (status=1) interviews only
 const deleteInterview = async (req, res) => {
   try {
     const { id } = req.params;
@@ -109,10 +118,62 @@ const deleteInterview = async (req, res) => {
   }
 };
 
-module.exports = { 
-  createInterview, 
-  updateInterviewResults, 
-  getInterviewReport, 
-  getUserHistory, 
-  deleteInterview 
+// 6. ARCHIVE — soft-archive a completed interview so it no longer counts against the limit
+const archiveInterview = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const interview = await Interview.findById(id);
+    if (!interview) return res.status(404).json({ message: "Interview not found" });
+    if (interview.archived) return res.status(400).json({ message: "Already archived" });
+
+    interview.archived = true;
+    interview.archived_at = new Date();
+    await interview.save();
+    res.status(200).json({ message: "Interview archived. Slot freed.", data: interview });
+  } catch (error) {
+    res.status(500).json({ message: "Error archiving interview", error: error.message });
+  }
+};
+
+// 7. UNARCHIVE — restore an archived interview (blocked if user is at limit)
+const unarchiveInterview = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const interview = await Interview.findById(id);
+    if (!interview) return res.status(404).json({ message: "Interview not found" });
+    if (!interview.archived) return res.status(400).json({ message: "Not archived" });
+
+    // Check if user has capacity to bring this back into active slots
+    const settings = await AdminSettings.findOne();
+    const maxInterviews = settings?.max_interviews || 6;
+    const activeCount = await Interview.countDocuments({
+      roll_no: interview.roll_no, status: 2, archived: { $ne: true }
+    });
+
+    if (activeCount >= maxInterviews) {
+      return res.status(403).json({
+        message: `You're at your interview limit (${activeCount}/${maxInterviews}). Archive another interview first to make room.`
+      });
+    }
+
+    // Proper unset so the field is actually removed from the document.
+    const updated = await Interview.findByIdAndUpdate(
+      id,
+      { $set: { archived: false }, $unset: { archived_at: "" } },
+      { new: true }
+    );
+    res.status(200).json({ message: "Interview restored to active.", data: updated });
+  } catch (error) {
+    res.status(500).json({ message: "Error unarchiving interview", error: error.message });
+  }
+};
+
+module.exports = {
+  createInterview,
+  updateInterviewResults,
+  getInterviewReport,
+  getUserHistory,
+  deleteInterview,
+  archiveInterview,
+  unarchiveInterview
 };

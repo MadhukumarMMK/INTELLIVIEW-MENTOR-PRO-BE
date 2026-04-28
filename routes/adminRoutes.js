@@ -48,7 +48,9 @@ router.get('/analytics/interviews', async (req, res) => {
         const skip = (page - 1) * limit;
         const search = req.query.search || '';
 
-        const filter = { status: 2 };
+        // Exclude archived interviews from admin analytics — archived is a
+        // student-side soft-delete that frees a slot but should not inflate stats.
+        const filter = { status: 2, archived: { $ne: true } };
         if (search) {
             filter.$or = [
                 { roll_no: { $regex: search, $options: 'i' } },
@@ -79,10 +81,10 @@ router.get('/analytics/interviews', async (req, res) => {
     }
 });
 
-// All interviews (no pagination) for charts — lightweight
+// All interviews (no pagination) for charts — lightweight. Excludes archived.
 router.get('/analytics/summary', async (req, res) => {
     try {
-        const interviews = await Interview.find({ status: 2 })
+        const interviews = await Interview.find({ status: 2, archived: { $ne: true } })
             .select('overall_score createdAt roll_no')
             .sort({ createdAt: -1 });
         res.status(200).json(interviews);
@@ -103,29 +105,169 @@ const excelStorage = multer.diskStorage({
 });
 const uploadExcel = multer({ storage: excelStorage });
 
-// List all users (paginated)
+// List users (paginated + filterable + aggregates).
+// Query: page, limit, search, college, branch, startDate, endDate, sortBy, sortOrder
 router.get('/users', async (req, res) => {
     try {
         const page = parseInt(req.query.page) || 1;
-        const limit = parseInt(req.query.limit) || 20;
-        const search = req.query.search || '';
+        const limit = parseInt(req.query.limit) || 10;
+        const search = (req.query.search || '').trim();
+        const college = (req.query.college || '').trim();
+        const branch = (req.query.branch || '').trim();
+        const startDate = req.query.startDate ? new Date(req.query.startDate) : null;
+        const endDate = req.query.endDate ? new Date(req.query.endDate) : null;
+        // sortBy ∈ { 'created_at', 'best_score', 'total_interviews', 'first_name' }
+        const sortBy = req.query.sortBy || 'created_at';
+        const sortOrder = req.query.sortOrder === 'asc' ? 1 : -1;
         const skip = (page - 1) * limit;
 
-        const filter = { role: { $ne: 'admin' } };
+        // --- Stage 1: User match filter (fast path — uses indexes on college/branch) ---
+        const userMatch = { role: { $ne: 'admin' } };
         if (search) {
-            filter.$or = [
+            userMatch.$or = [
                 { roll_no: { $regex: search, $options: 'i' } },
                 { first_name: { $regex: search, $options: 'i' } },
                 { email: { $regex: search, $options: 'i' } }
             ];
         }
+        if (college) userMatch.college = college;
+        if (branch) userMatch.branch = branch;
+        if (startDate || endDate) {
+            userMatch.created_at = {};
+            if (startDate) userMatch.created_at.$gte = startDate;
+            if (endDate) userMatch.created_at.$lte = endDate;
+        }
 
-        const [users, totalCount] = await Promise.all([
-            User.find(filter).select('-password').sort({ created_at: -1 }).skip(skip).limit(limit),
-            User.countDocuments(filter)
+        // --- Stage 2: Aggregate with interview join to produce per-user stats ---
+        // Sort field map: some fields need computed values; translate to aggregation-friendly names
+        const sortField = {
+            created_at: 'created_at',
+            best_score: 'best_score',
+            total_interviews: 'total_interviews',
+            first_name: 'first_name'
+        }[sortBy] || 'created_at';
+
+        const pipeline = [
+            { $match: userMatch },
+            {
+                $lookup: {
+                    from: 'interviews',
+                    let: { rn: '$roll_no' },
+                    pipeline: [
+                        {
+                            $match: {
+                                $expr: {
+                                    $and: [
+                                        { $eq: ['$roll_no', '$$rn'] },
+                                        { $eq: ['$status', 2] },
+                                        { $ne: ['$archived', true] }
+                                    ]
+                                }
+                            }
+                        },
+                        { $project: { overall_score: 1, mode: 1, technology_name: 1, createdAt: 1, level: 1 } }
+                    ],
+                    as: 'interviews'
+                }
+            },
+            {
+                $addFields: {
+                    total_interviews: { $size: '$interviews' },
+                    best_score: { $ifNull: [ { $max: '$interviews.overall_score' }, 0 ] },
+                    technologies: {
+                        $setUnion: [
+                            { $filter: {
+                                input: '$interviews.technology_name',
+                                as: 't',
+                                cond: { $and: [ { $ne: ['$$t', null] }, { $ne: ['$$t', ''] } ] }
+                            } },
+                            []
+                        ]
+                    },
+                    best_resume: {
+                        $max: {
+                            $map: {
+                                input: { $filter: { input: '$interviews', as: 'i', cond: { $eq: ['$$i.mode', 'resume'] } } },
+                                as: 'i',
+                                in: '$$i.overall_score'
+                            }
+                        }
+                    },
+                    best_custom: {
+                        $max: {
+                            $map: {
+                                input: { $filter: { input: '$interviews', as: 'i', cond: { $eq: ['$$i.mode', 'custom'] } } },
+                                as: 'i',
+                                in: '$$i.overall_score'
+                            }
+                        }
+                    },
+                    best_hr: {
+                        $max: {
+                            $map: {
+                                input: { $filter: { input: '$interviews', as: 'i', cond: { $eq: ['$$i.mode', 'hr'] } } },
+                                as: 'i',
+                                in: '$$i.overall_score'
+                            }
+                        }
+                    }
+                }
+            },
+            { $project: { password: 0, interviews: 0 } },
+            { $sort: { [sortField]: sortOrder, _id: 1 } },
+            {
+                $facet: {
+                    data: [ { $skip: skip }, { $limit: limit } ],
+                    totalCount: [ { $count: 'count' } ]
+                }
+            }
+        ];
+
+        const [result] = await User.aggregate(pipeline);
+        const users = result?.data || [];
+        const totalCount = result?.totalCount?.[0]?.count || 0;
+
+        res.json({
+            users,
+            pagination: {
+                page,
+                limit,
+                totalCount,
+                totalPages: Math.ceil(totalCount / limit)
+            }
+        });
+    } catch (err) {
+        console.error('Admin users API error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Distinct colleges + branches for filter dropdowns
+router.get('/users/filter-facets', async (req, res) => {
+    try {
+        const [colleges, branches] = await Promise.all([
+            User.distinct('college', { role: { $ne: 'admin' }, college: { $nin: [null, ''] } }),
+            User.distinct('branch', { role: { $ne: 'admin' }, branch: { $nin: [null, ''] } })
         ]);
+        res.json({
+            colleges: colleges.sort(),
+            branches: branches.sort()
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
 
-        res.json({ users, pagination: { page, limit, totalCount, totalPages: Math.ceil(totalCount / limit) } });
+// Resume download proxy — admin downloads a user's resume by roll_no
+router.get('/users/:roll_no/resume', async (req, res) => {
+    try {
+        const user = await User.findOne({ roll_no: req.params.roll_no });
+        if (!user?.resume_path) return res.status(404).json({ message: 'No resume on file for this user.' });
+        const path = require('path');
+        const fs = require('fs');
+        const abs = path.resolve(user.resume_path);
+        if (!fs.existsSync(abs)) return res.status(404).json({ message: 'Resume file is missing on disk.' });
+        res.download(abs, path.basename(user.resume_path));
     } catch (err) {
         res.status(500).json({ error: err.message });
     }

@@ -10,11 +10,13 @@ const app = express();
 const server = http.createServer(app);
 
 // Initialize Socket.io (Goal #10 & #20: Real-time Arena)
+// maxHttpBufferSize bumped to 10MB to allow audio base64 payloads for SER model
 const io = new Server(server, {
   cors: {
     origin: "*",
     methods: ["GET", "POST"]
-  }
+  },
+  maxHttpBufferSize: 10 * 1024 * 1024
 });
 
 connectDB();
@@ -30,6 +32,11 @@ const fs = require("fs");
 
 // Goal #14: Admin Dynamic Configuration
 const pythonEngineUrl = process.env.PYTHON_ENGINE_URL || "http://localhost:5002";
+
+// AUDIO_MODE: "real" sends audio binary (base64) for SER model inference (local)
+//             "size" sends only byte count for heuristic (Render free tier)
+const AUDIO_MODE = (process.env.AUDIO_MODE || "real").toLowerCase();
+console.log(`Audio Mode: ${AUDIO_MODE}`);
 
 // --- WebSocket Logic (Multimodal Feedback Loop) ---
 io.on("connection", (socket) => {
@@ -74,19 +81,25 @@ io.on("connection", (socket) => {
         ? confidenceBuffer.reduce((a, b) => a + b) / confidenceBuffer.length
         : 50;
 
-      // 2. Calculate audio size for confidence heuristic (no base64 needed)
+      // 2. Combine audio chunks — always get size; base64 only in "real" mode
       let audioSize = 0;
+      let audioBase64 = null;
       if (audioChunks.length > 0) {
         const combinedAudio = Buffer.concat(audioChunks);
         audioSize = combinedAudio.length;
-        console.log(`Audio: ${audioChunks.length} chunks, ${audioSize} bytes`);
+        if (AUDIO_MODE === "real") {
+          audioBase64 = combinedAudio.toString("base64");
+          console.log(`Audio: ${audioChunks.length} chunks, ${audioSize} bytes → SER model`);
+        } else {
+          console.log(`Audio: ${audioChunks.length} chunks, ${audioSize} bytes → size heuristic`);
+        }
       }
 
       // 3. Clear buffers for next question
       confidenceBuffer = [];
       audioChunks = [];
 
-      // 4. Build lightweight payload for Python Engine (no audio binary)
+      // 4. Build payload for Python Engine
       const pythonPayload = {
         roll_no: payload.roll_no,
         question: payload.lastQuestion || "",
@@ -94,6 +107,7 @@ io.on("connection", (socket) => {
         difficulty: payload.difficulty || "Medium",
         avg_confidence: avgConfidence,
         audio_size: audioSize,
+        audio_base64: audioBase64,
         was_skipped: wasSkipped,
         tech: payload.tech || "General",
         module: payload.module || "",
@@ -133,6 +147,7 @@ io.on("connection", (socket) => {
         feedback: response.data.feedback,
         fused_confidence: response.data.fused_confidence,
         audio_confidence: response.data.audio_confidence,
+        audio_emotion: response.data.audio_emotion,
         is_complete: isComplete
       });
 
@@ -154,6 +169,87 @@ app.use("/api/user", require("./routes/userRoutes"));
 app.use("/api/interviews", require("./routes/interviewRoutes"));
 app.use("/api/general", require("./routes/generalRoutes"));
 app.use("/api/admin", require("./routes/adminRoutes"));
+
+// --- SOCIAL PREVIEW (Open Graph) for shared profile links ---
+// LinkedIn / WhatsApp / Twitter bots crawl the URL and read <meta og:*> tags.
+// React SPA's index.html is the same for every route, so the bot sees no
+// useful preview. Here we serve a tiny HTML page (only when bot user-agent or
+// when the request prefers HTML) that contains real OG tags scraped from
+// MongoDB, then redirects browsers to the SPA route via JS.
+app.get("/profile/share/:roll_no", async (req, res, next) => {
+  const accept = (req.headers.accept || "").toLowerCase();
+  const ua = (req.headers["user-agent"] || "").toLowerCase();
+  // If this looks like a normal browser opening the page directly, fall through
+  // to the SPA (the frontend dev server / static hosting handles the React route).
+  // We intercept ONLY for crawler user-agents, OR when the response should be
+  // an unauthenticated HTML preview (no Accept JSON). Browsers also benefit
+  // since the same OG tags are read by their own preview cards.
+  const isBot = /linkedin|facebook|whatsapp|twitter|slack|discord|telegram|preview|bot|crawler|spider/i.test(ua);
+  if (!isBot && !accept.includes("text/html")) return next();
+
+  try {
+    const User = require("./models/user");
+    const Interview = require("./models/Interview");
+    const user = await User.findOne({ roll_no: req.params.roll_no })
+      .select("first_name roll_no college branch profile_picture skills");
+
+    if (!user) return next(); // let the SPA show the "not found" view
+
+    const completed = await Interview.countDocuments({
+      roll_no: req.params.roll_no, status: 2, archived: { $ne: true }
+    });
+    const best = await Interview.findOne({
+      roll_no: req.params.roll_no, status: 2, archived: { $ne: true }
+    }).sort({ overall_score: -1 }).select("overall_score");
+
+    const bestScore = best ? Math.round(best.overall_score || 0) : 0;
+    const skillsLine = (user.skills || []).slice(0, 5).join(", ");
+    const title = `${user.first_name || user.roll_no} · IntelliView Interview Profile`;
+    const description = `${user.first_name || "Candidate"} · ${user.college || "Student"}${user.branch ? " (" + user.branch + ")" : ""} · ${completed} mock interviews · Best score ${bestScore}%${skillsLine ? " · Skills: " + skillsLine : ""}`;
+    const fullUrl = `${req.protocol}://${req.get("host")}/profile/share/${req.params.roll_no}`;
+    const imageUrl = user.profile_picture
+      ? `${req.protocol}://${req.get("host")}${user.profile_picture}`
+      : `${req.protocol}://${req.get("host")}/og-default.png`;
+
+    const escape = (s) => String(s).replace(/[&<>"']/g, c => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+    }[c]));
+
+    res.setHeader("Cache-Control", "public, max-age=300");
+    res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>${escape(title)}</title>
+  <meta name="description" content="${escape(description)}" />
+
+  <!-- Open Graph (LinkedIn, Facebook, WhatsApp) -->
+  <meta property="og:title" content="${escape(title)}" />
+  <meta property="og:description" content="${escape(description)}" />
+  <meta property="og:image" content="${escape(imageUrl)}" />
+  <meta property="og:url" content="${escape(fullUrl)}" />
+  <meta property="og:type" content="profile" />
+  <meta property="og:site_name" content="IntelliView" />
+
+  <!-- Twitter / X -->
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="${escape(title)}" />
+  <meta name="twitter:description" content="${escape(description)}" />
+  <meta name="twitter:image" content="${escape(imageUrl)}" />
+
+  <!-- Browsers: redirect to the actual React app route -->
+  <meta http-equiv="refresh" content="0; url=${escape(process.env.CLIENT_URL || "/")}/profile/share/${encodeURIComponent(req.params.roll_no)}" />
+</head>
+<body>
+  <p>Loading IntelliView profile…</p>
+  <script>window.location.replace(${JSON.stringify((process.env.CLIENT_URL || "/") + "/profile/share/" + req.params.roll_no)});</script>
+</body>
+</html>`);
+  } catch (err) {
+    console.error("OG preview error:", err.message);
+    next();
+  }
+});
 
 const PORT = process.env.PORT || 5001;
 server.listen(PORT, () => console.log(`IntelliView Hub running on port ${PORT}`));

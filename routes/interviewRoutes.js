@@ -1,11 +1,13 @@
 const express = require("express");
 const router = express.Router();
-const { 
-  createInterview, 
-  updateInterviewResults, 
-  getInterviewReport, 
-  getUserHistory, 
-  deleteInterview 
+const {
+  createInterview,
+  updateInterviewResults,
+  getInterviewReport,
+  getUserHistory,
+  deleteInterview,
+  archiveInterview,
+  unarchiveInterview
 } = require("../controllers/InterviewController");
 const adaptiveController = require("../controllers/adaptiveController");
 
@@ -13,7 +15,9 @@ router.post("/create", createInterview);
 router.put("/update/:id", updateInterviewResults); // <--- For saving final results
 router.get("/report/:id", getInterviewReport);     // <--- For the Report page
 router.get("/history/:roll_no", getUserHistory);
-router.delete("/delete/:id", deleteInterview);
+router.delete("/delete/:id", deleteInterview);       // kept for aborted/in-progress cleanup
+router.put("/archive/:id", archiveInterview);        // soft archive — frees a slot
+router.put("/unarchive/:id", unarchiveInterview);    // restore — blocked if user is at limit
 router.post("/adaptive-step", adaptiveController.getNextQuestion);
 
 // Proxy: initial question generation to Python engine
