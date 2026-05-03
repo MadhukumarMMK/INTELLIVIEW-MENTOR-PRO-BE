@@ -139,13 +139,26 @@ io.on("connection", (socket) => {
       // 6. Check if this was the last question
       const isComplete = questionsAsked >= totalQuestions;
 
-      // 7. Emit result back to frontend
+      // 7. Validate Python's response — empty next_question on a non-final
+      //    step would leave the user stuck. Substitute a safe fallback so
+      //    the interview never deadlocks.
+      let nextQuestion = response.data.question;
+      if (!isComplete && (!nextQuestion || typeof nextQuestion !== "string" || !nextQuestion.trim())) {
+        console.warn(`⚠️ Python returned empty next_question (mode=${pythonPayload.mode}). Substituting fallback.`);
+        nextQuestion = pythonPayload.mode === "hr"
+          ? "Tell me about a time you handled a difficult situation at work."
+          : pythonPayload.mode === "resume"
+          ? "Walk me through a technical decision you made on a recent project."
+          : `Explain a core concept in ${pythonPayload.tech || "your stack"} and why it matters.`;
+      }
+
+      // 8. Emit result back to frontend
       socket.emit("next_step_ready", {
-        next_question: response.data.question,
-        new_difficulty: response.data.new_difficulty,
-        accuracy: response.data.last_score,
-        feedback: response.data.feedback,
-        fused_confidence: response.data.fused_confidence,
+        next_question: nextQuestion,
+        new_difficulty: response.data.new_difficulty || pythonPayload.difficulty,
+        accuracy: response.data.last_score || 0,
+        feedback: response.data.feedback || "",
+        fused_confidence: response.data.fused_confidence || 0,
         audio_confidence: response.data.audio_confidence,
         audio_emotion: response.data.audio_emotion,
         is_complete: isComplete
