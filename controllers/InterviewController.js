@@ -46,7 +46,10 @@ const createInterview = async (req, res) => {
 const updateInterviewResults = async (req, res) => {
   try {
     const { id } = req.params;
-    const { question_details, emotions, overall_analysis, overall_score } = req.body;
+    const {
+      question_details, emotions, overall_analysis, overall_score,
+      total_time_taken, avg_time_per_question,
+    } = req.body;
 
     const updateData = { status: 2 };
     if (question_details) {
@@ -59,6 +62,8 @@ const updateInterviewResults = async (req, res) => {
     if (emotions) updateData.emotions = emotions;
     if (overall_analysis) updateData.overall_analysis = overall_analysis;
     if (overall_score !== undefined) updateData.overall_score = overall_score;
+    if (total_time_taken !== undefined) updateData.total_time_taken = total_time_taken;
+    if (avg_time_per_question !== undefined) updateData.avg_time_per_question = avg_time_per_question;
 
     const updatedInterview = await Interview.findByIdAndUpdate(
       id,

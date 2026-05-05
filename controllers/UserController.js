@@ -42,69 +42,28 @@ const uploadAndParseResume = async (req, res) => {
 
         if (!req.file) return res.status(400).json({ message: "No resume uploaded." });
 
-        // Find the existing user so we can clean up their previous resume file
         const existingUser = await User.findOne({ roll_no });
         if (!existingUser) {
             if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
             return res.status(404).json({ message: "User not found." });
         }
 
-        // Send the NEW file to the Python parser for skill extraction
-        const formData = new FormData();
-        formData.append('file', fs.createReadStream(req.file.path), req.file.originalname);
-
-        const pythonUrl = process.env.PYTHON_ENGINE_URL || 'http://localhost:5002';
-
+        // ===== STEP 1: Call Python parser =====
+        // Errors here = Python is down / unreachable / returned junk.
+        let extractedData;
         try {
+            const formData = new FormData();
+            formData.append('file', fs.createReadStream(req.file.path), req.file.originalname);
+            const pythonUrl = process.env.PYTHON_ENGINE_URL || 'http://localhost:5002';
             const nlpResponse = await axios.post(
                 `${pythonUrl}/api/extract-resume`,
                 formData,
                 { headers: { ...formData.getHeaders() }, timeout: 30000 }
             );
-
-            const extractedData = nlpResponse.data.data;
-            if (!extractedData) throw new Error("No data returned from parser");
-
-            // Parse succeeded — only now is it safe to delete the OLD resume file
-            if (existingUser.resume_path && existingUser.resume_path !== req.file.path) {
-                try {
-                    if (fs.existsSync(existingUser.resume_path)) {
-                        fs.unlinkSync(existingUser.resume_path);
-                    }
-                } catch (cleanupErr) {
-                    console.warn("Could not remove previous resume:", cleanupErr.message);
-                }
-            }
-
-            // Build update fields — a resume re-upload is the user declaring the new
-            // resume is their current source of truth, so REPLACE skills AND refresh
-            // identity fields (name, email, github, linkedin, mobile) from the new CV.
-            const updateFields = {
-                skills: extractedData.skills || [],
-                resume_path: req.file.path,
-                mobile_number: extractedData.mobile_number || existingUser.mobile_number || "",
-            };
-
-            if (extractedData.name) updateFields.first_name = extractedData.name;
-            if (extractedData.email) updateFields.email = extractedData.email;
-            if (extractedData.github) updateFields.github_url = extractedData.github;
-            if (extractedData.linkedin) updateFields.linkedin_url = extractedData.linkedin;
-
-            const updatedUser = await User.findOneAndUpdate(
-                { roll_no },
-                { $set: updateFields },
-                { new: true }
-            ).select("-password");
-
-            return res.status(200).json({
-                message: "Resume parsed successfully",
-                extracted_data: extractedData,
-                user: updatedUser
-            });
-
-        } catch (apiError) {
-            console.error("Python Bridge Error:", apiError.message);
-            // Parser failed — delete the NEW file so we don't orphan it
+            extractedData = nlpResponse.data.data;
+            if (!extractedData) throw new Error("Parser returned no data");
+        } catch (pyErr) {
+            console.error("Python Bridge Error:", pyErr.message);
             if (req.file && fs.existsSync(req.file.path)) {
                 try { fs.unlinkSync(req.file.path); } catch (_) {}
             }
@@ -113,6 +72,80 @@ const uploadAndParseResume = async (req, res) => {
             });
         }
 
+        // ===== STEP 2: Cleanup old resume file (parse succeeded) =====
+        if (existingUser.resume_path && existingUser.resume_path !== req.file.path) {
+            try {
+                if (fs.existsSync(existingUser.resume_path)) {
+                    fs.unlinkSync(existingUser.resume_path);
+                }
+            } catch (cleanupErr) {
+                console.warn("Could not remove previous resume:", cleanupErr.message);
+            }
+        }
+
+        // ===== STEP 3: Build safe update fields =====
+        const updateFields = {
+            skills: extractedData.skills || [],
+            resume_path: req.file.path,
+            mobile_number: extractedData.mobile_number || existingUser.mobile_number || "",
+        };
+
+        if (extractedData.name)     updateFields.first_name   = extractedData.name;
+        if (extractedData.github)   updateFields.github_url   = extractedData.github;
+        if (extractedData.linkedin) updateFields.linkedin_url = extractedData.linkedin;
+
+        // Email is unique-indexed in the User schema. If the resume's email
+        // differs from the user's CURRENT email AND already belongs to
+        // someone else, skip the update — better to keep the old email than
+        // crash the whole request with a duplicate-key error.
+        if (extractedData.email) {
+            const newEmail = String(extractedData.email).toLowerCase().trim();
+            const currentEmail = (existingUser.email || "").toLowerCase().trim();
+            if (newEmail !== currentEmail) {
+                const conflict = await User.findOne({
+                    email: newEmail,
+                    roll_no: { $ne: roll_no }
+                }).lean();
+                if (conflict) {
+                    console.warn(
+                        `Resume email '${newEmail}' belongs to another user (roll: ${conflict.roll_no}). ` +
+                        `Keeping existing email for ${roll_no}.`
+                    );
+                } else {
+                    updateFields.email = newEmail;
+                }
+            }
+        }
+
+        // ===== STEP 4: Persist update — DB errors handled separately =====
+        let updatedUser;
+        try {
+            updatedUser = await User.findOneAndUpdate(
+                { roll_no },
+                { $set: updateFields },
+                { new: true, runValidators: true }
+            ).select("-password");
+        } catch (dbErr) {
+            console.error("DB Update Error:", dbErr.message, "code:", dbErr.code, "keys:", dbErr.keyValue);
+            // Parsing worked, only the persistence step failed. Return the
+            // extracted data so the user at least sees what we parsed; they
+            // can manually save their profile after fixing the conflict.
+            const isDup = dbErr.code === 11000;
+            return res.status(isDup ? 409 : 500).json({
+                message: isDup
+                    ? `Some profile fields couldn't be updated due to a conflict (${Object.keys(dbErr.keyValue || {}).join(', ')}). Your skills are saved.`
+                    : "Resume was parsed but the profile update failed. Please try again.",
+                extracted_data: extractedData,
+                user: existingUser,
+                conflict_field: isDup ? Object.keys(dbErr.keyValue || {}) : undefined,
+            });
+        }
+
+        return res.status(200).json({
+            message: "Resume parsed successfully",
+            extracted_data: extractedData,
+            user: updatedUser
+        });
     } catch (error) {
         console.error("Resume Parsing Error:", error.message);
         if (req.file && fs.existsSync(req.file.path)) {

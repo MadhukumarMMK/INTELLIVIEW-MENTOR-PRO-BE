@@ -109,6 +109,11 @@ io.on("connection", (socket) => {
         audio_size: audioSize,
         audio_base64: audioBase64,
         was_skipped: wasSkipped,
+        // Per-question timing (seconds). Forwarded back unchanged in the
+        // socket response so Interview.js can stash it in question_details.
+        time_taken: typeof payload.time_taken === 'number' ? payload.time_taken : 0,
+        time_limit: typeof payload.time_limit === 'number' ? payload.time_limit : 60,
+        auto_skipped: !!payload.auto_skipped,
         tech: payload.tech || "General",
         module: payload.module || "",
         topic: payload.topic || "",
@@ -152,7 +157,9 @@ io.on("connection", (socket) => {
           : `Explain a core concept in ${pythonPayload.tech || "your stack"} and why it matters.`;
       }
 
-      // 8. Emit result back to frontend
+      // 8. Emit result back to frontend.
+      // Echo timing fields so the frontend can record per-question elapsed
+      // time in question_details for the report.
       socket.emit("next_step_ready", {
         next_question: nextQuestion,
         new_difficulty: response.data.new_difficulty || pythonPayload.difficulty,
@@ -161,6 +168,9 @@ io.on("connection", (socket) => {
         fused_confidence: response.data.fused_confidence || 0,
         audio_confidence: response.data.audio_confidence,
         audio_emotion: response.data.audio_emotion,
+        time_taken: pythonPayload.time_taken,
+        time_limit: pythonPayload.time_limit,
+        auto_skipped: pythonPayload.auto_skipped,
         is_complete: isComplete
       });
 

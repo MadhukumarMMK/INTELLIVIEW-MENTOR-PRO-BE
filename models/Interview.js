@@ -41,6 +41,10 @@ const InterviewSchema = mongoose.Schema({
   },
   
   overall_score: { type: Number, default: 0 },
+  // Per-question timing aggregates (seconds). Populated when the interview
+  // completes from question_details[*].time_taken values.
+  total_time_taken: { type: Number, default: 0 },
+  avg_time_per_question: { type: Number, default: 0 },
   created_by: { type: String },
   status: { type: Number },
 
