@@ -23,16 +23,19 @@ router.put('/settings', async (req, res) => {
     try {
         let settings = await AdminSettings.findOne();
         if (!settings) settings = new AdminSettings();
-        
+
         settings.max_interviews = req.body.max_interviews ?? settings.max_interviews;
         settings.default_password = req.body.default_password || settings.default_password;
         settings.questions_per_session = req.body.questions_per_session || settings.questions_per_session;
         settings.questions_resume = req.body.questions_resume ?? settings.questions_resume;
         settings.questions_custom = req.body.questions_custom ?? settings.questions_custom;
         settings.questions_hr = req.body.questions_hr ?? settings.questions_hr;
+        settings.time_per_question_resume = req.body.time_per_question_resume ?? settings.time_per_question_resume;
+        settings.time_per_question_custom = req.body.time_per_question_custom ?? settings.time_per_question_custom;
+        settings.time_per_question_hr     = req.body.time_per_question_hr     ?? settings.time_per_question_hr;
         settings.session_time_limit = req.body.session_time_limit || settings.session_time_limit;
         settings.starting_difficulty = req.body.starting_difficulty || settings.starting_difficulty;
-        
+
         await settings.save();
         res.status(200).json({ message: "Global settings updated", settings });
     } catch (err) {
