@@ -63,13 +63,25 @@ const uploadAndParseResume = async (req, res) => {
             extractedData = nlpResponse.data.data;
             if (!extractedData) throw new Error("Parser returned no data");
         } catch (pyErr) {
-            console.error("Python Bridge Error:", pyErr.message);
+            console.error("Python Bridge Error:", pyErr.code || '', pyErr.message);
             if (req.file && fs.existsSync(req.file.path)) {
                 try { fs.unlinkSync(req.file.path); } catch (_) {}
             }
-            return res.status(503).json({
-                message: "Resume parser is unavailable. Please try again shortly."
-            });
+            // Distinguish failure modes so the UI shows an actionable message
+            // and the server log carries the real cause.
+            let userMsg = "Resume parser is unavailable. Please try again shortly.";
+            const code = pyErr.code || '';
+            const status = pyErr.response?.status;
+            if (code === 'ECONNREFUSED' || code === 'ENOTFOUND' || code === 'EHOSTUNREACH') {
+                userMsg = "Resume parser is not reachable (service may be down). Ask an admin to restart it.";
+            } else if (code === 'ECONNABORTED' || /timeout/i.test(pyErr.message || '')) {
+                userMsg = "Resume parsing timed out. The file may be very large or text-locked — try a smaller / text-based PDF.";
+            } else if (status >= 400 && status < 500) {
+                userMsg = pyErr.response?.data?.message || "Resume couldn't be parsed (unsupported format or corrupted file).";
+            } else if (status >= 500) {
+                userMsg = "Resume parser crashed on this file. Try a different PDF or contact support.";
+            }
+            return res.status(503).json({ message: userMsg });
         }
 
         // ===== STEP 2: Cleanup old resume file (parse succeeded) =====
@@ -84,37 +96,21 @@ const uploadAndParseResume = async (req, res) => {
         }
 
         // ===== STEP 3: Build safe update fields =====
+        // Identity-preserving rule: a resume upload is for SKILL extraction
+        // only. We never overwrite the account's email, first_name, github,
+        // or linkedin from the resume — these are identity fields the user
+        // owns at registration. This also avoids the E11000 duplicate-key
+        // error when many visitors upload resumes through a shared account
+        // (kiosk / expo) and a resume's parsed email collides with another
+        // user's email.
         const updateFields = {
             skills: extractedData.skills || [],
             resume_path: req.file.path,
-            mobile_number: extractedData.mobile_number || existingUser.mobile_number || "",
         };
-
-        if (extractedData.name)     updateFields.first_name   = extractedData.name;
-        if (extractedData.github)   updateFields.github_url   = extractedData.github;
-        if (extractedData.linkedin) updateFields.linkedin_url = extractedData.linkedin;
-
-        // Email is unique-indexed in the User schema. If the resume's email
-        // differs from the user's CURRENT email AND already belongs to
-        // someone else, skip the update — better to keep the old email than
-        // crash the whole request with a duplicate-key error.
-        if (extractedData.email) {
-            const newEmail = String(extractedData.email).toLowerCase().trim();
-            const currentEmail = (existingUser.email || "").toLowerCase().trim();
-            if (newEmail !== currentEmail) {
-                const conflict = await User.findOne({
-                    email: newEmail,
-                    roll_no: { $ne: roll_no }
-                }).lean();
-                if (conflict) {
-                    console.warn(
-                        `Resume email '${newEmail}' belongs to another user (roll: ${conflict.roll_no}). ` +
-                        `Keeping existing email for ${roll_no}.`
-                    );
-                } else {
-                    updateFields.email = newEmail;
-                }
-            }
+        // Mobile number is non-unique and a useful contact field — only
+        // populate if the user doesn't already have one.
+        if (!existingUser.mobile_number && extractedData.mobile_number) {
+            updateFields.mobile_number = extractedData.mobile_number;
         }
 
         // ===== STEP 4: Persist update — DB errors handled separately =====

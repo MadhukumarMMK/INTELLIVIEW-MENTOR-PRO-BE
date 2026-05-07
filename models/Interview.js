@@ -55,6 +55,10 @@ const InterviewSchema = mongoose.Schema({
 
   // Mode: 'resume' | 'custom' | 'hr' — needed so archived reports can be grouped by type.
   mode: { type: String },
+
+  // Expo-mode personalization: visitor name captured by voice on the
+  // greet page. Empty string for non-expo interviews.
+  candidate_name: { type: String, default: "" },
 }, {
   timestamps: true,
   collection: 'interviews'

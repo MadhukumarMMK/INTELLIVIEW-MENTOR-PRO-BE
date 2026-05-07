@@ -18,7 +18,11 @@ const adminSettingsSchema = new mongoose.Schema({
         type: String,
         enum: ['Easy', 'Medium', 'Hard'],
         default: 'Medium'
-    }
+    },
+
+    // Expo Mode — single toggle that activates the voice-greeted name capture
+    // flow + leaderboard. When false (default), real-user behaviour is unchanged.
+    expo_mode: { type: Boolean, default: false }
 }, { timestamps: true });
 
 module.exports = mongoose.model('AdminSettings', adminSettingsSchema);

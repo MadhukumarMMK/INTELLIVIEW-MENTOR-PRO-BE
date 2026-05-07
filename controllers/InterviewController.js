@@ -5,7 +5,7 @@ const AdminSettings = require("../models/AdminSettings");
 // 1. CREATE (Start of Interview)
 const createInterview = async (req, res) => {
   try {
-    const { roll_no, technology_name, level, questions_count, mode } = req.body;
+    const { roll_no, technology_name, level, questions_count, mode, candidate_name } = req.body;
 
     // Fetch dynamic limit from admin settings
     const settings = await AdminSettings.findOne();
@@ -32,7 +32,8 @@ const createInterview = async (req, res) => {
       questions_count,
       mode,
       start_date_time: new Date(),
-      status: 1 // 1 = In Progress
+      status: 1, // 1 = In Progress
+      candidate_name: (candidate_name || "").toString().trim().slice(0, 60)
     });
 
     const savedInterview = await newInterview.save();

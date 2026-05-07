@@ -35,6 +35,7 @@ router.put('/settings', async (req, res) => {
         settings.time_per_question_hr     = req.body.time_per_question_hr     ?? settings.time_per_question_hr;
         settings.session_time_limit = req.body.session_time_limit || settings.session_time_limit;
         settings.starting_difficulty = req.body.starting_difficulty || settings.starting_difficulty;
+        if (req.body.expo_mode !== undefined) settings.expo_mode = !!req.body.expo_mode;
 
         await settings.save();
         res.status(200).json({ message: "Global settings updated", settings });
@@ -386,6 +387,76 @@ router.put('/users/:roll_no/reset-password', async (req, res) => {
         await User.findOneAndUpdate({ roll_no: req.params.roll_no }, { password: hashedPwd });
         res.json({ message: `Password reset to default for ${req.params.roll_no}` });
     } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// --- Expo Leaderboard ---
+// Returns the top scorers (with names) ranked by a combined accuracy +
+// confidence score. Only completed, named, non-archived interviews count.
+//
+// Combined score = 0.7 × overall_score + 0.3 × avg(question_details.fused_confidence)
+//
+// The avg_confidence is computed in-aggregation from question_details so we
+// don't need a denormalized field on the document — the data is already there.
+router.get('/leaderboard', async (req, res) => {
+    try {
+        const limit = Math.min(parseInt(req.query.limit) || 20, 100);
+        const board = await Interview.aggregate([
+            {
+                $match: {
+                    status: 2,
+                    archived: { $ne: true },
+                    candidate_name: { $exists: true, $nin: [null, ""] }
+                }
+            },
+            {
+                $addFields: {
+                    avg_confidence: {
+                        $cond: {
+                            if: { $gt: [{ $size: { $ifNull: ['$question_details', []] } }, 0] },
+                            then: {
+                                $avg: {
+                                    $map: {
+                                        input: '$question_details',
+                                        as: 'q',
+                                        in: { $ifNull: ['$$q.fused_confidence', 0] }
+                                    }
+                                }
+                            },
+                            else: 0
+                        }
+                    }
+                }
+            },
+            {
+                $addFields: {
+                    combined_score: {
+                        $add: [
+                            { $multiply: [{ $ifNull: ['$overall_score', 0] }, 0.7] },
+                            { $multiply: ['$avg_confidence', 0.3] }
+                        ]
+                    }
+                }
+            },
+            { $sort: { combined_score: -1, start_date_time: -1 } },
+            { $limit: limit },
+            {
+                $project: {
+                    _id: 1,
+                    candidate_name: 1,
+                    technology_name: 1,
+                    mode: 1,
+                    overall_score: 1,
+                    avg_confidence: { $round: ['$avg_confidence', 0] },
+                    combined_score: { $round: ['$combined_score', 1] },
+                    start_date_time: 1
+                }
+            }
+        ]);
+        res.json({ leaderboard: board });
+    } catch (err) {
+        console.error('Leaderboard error:', err);
         res.status(500).json({ error: err.message });
     }
 });
